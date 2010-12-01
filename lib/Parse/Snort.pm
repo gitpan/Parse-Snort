@@ -6,13 +6,15 @@ use base qw(Class::Accessor);
 use List::Util qw(first);
 use Carp qw(carp);
 
+our $VERSION = '0.5';
+
 =head1 NAME
 
 Parse::Snort - Parse and create Snort rules
 
 =head1 VERSION
 
-Version 0.01
+Version 0.05
 
 =head1 SYNOPSIS
 
@@ -43,32 +45,42 @@ Version 0.01
 
 =cut 
 
-our $VERSION                = '0.01';
-our @RULE_ACTIONS           = qw/ alert pass drop sdrop log /;
-our @RULE_ELEMENTS_REQUIRED =
-  qw/ action proto src src_port direction dst dst_port /;
+our @RULE_ACTIONS           = qw/ alert pass drop sdrop log activate dynamic reject /;
+our @RULE_ELEMENTS_REQUIRED = qw/ action proto src src_port direction dst dst_port /;
 our @RULE_ELEMENTS = ( @RULE_ELEMENTS_REQUIRED, 'opts' );
 
-__PACKAGE__->mk_accessors(@RULE_ELEMENTS);
+# create the accessors for the standard parts (note; opts comes later)
+__PACKAGE__->mk_accessors(@RULE_ELEMENTS_REQUIRED);
+
 
 =head1 METHODS
 
-The following methods can be used to read or modify parts of a rule.
+These are the object methods that can be used to read or modify any part of a Snort rule.  B<Please note: None of these methods provide any sort of input validation to make sure that the rule makes sense, or can be parsed at all by Snort.>  
+
+=for comment If input validation is required, check out the L<Parse::Snort::Strict> module.
 
 =over 4
 
-=item B<new($rule_string)>, B<new($rule_element_ref)>
+=item new ()
 
-This function will create a new C<Parse::Snort> object.  You may pass nothing, a string containing a properly formatted Snort rule, or a gash reference of rule elements and options.
+Create a new C<Parse::Snort> object, and return it.  There are a couple of options when creating the object:
 
 =over 4
 
-=item B<$rule_string>
+=item new ( )
+
+Create an unpopulated object, that can be filled in using the individual rule element methods, or can be populated with the L<< parse|/"PARSE" >> method.
+
+=item new ( $rule_string )
+
+Create an object based on a plain text Snort rule, all on one line.  This module doesn't understand the UNIX style line continuations (a backslash at the end of the line) that Snort does.
 
   $rule_string = 'alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"perl 6 download detected\; may the world rejoice!";depth:150; offset:0; content:"perl-6.0.0"; nocase;)'
 
 
-=item B<$rule_element_hashref>
+=item new ( $rule_element_hashref )
+
+Create an object baesd on a prepared hash reference similar to the internal strucutre of the L<Parse::Snort> object.
 
   $rule_element_hashref = {
     action => 'alert',
@@ -77,7 +89,7 @@ This function will create a new C<Parse::Snort> object.  You may pass nothing, a
     direction => '->',
     dst => '$HOME_NET', dst_port => 'any',
     opts => [
-    	[ 'msg' => ':"perl 6 download detected\; may the world rejoice!"' ],
+    	[ 'msg' => '"perl 6 download detected\; may the world rejoice!"' ],
     	[ 'depth' => 150 ],
     	[ 'offset' => 0 ].
     	[ 'content' => 'perl-6.0.0' ],
@@ -91,43 +103,57 @@ This function will create a new C<Parse::Snort> object.  You may pass nothing, a
 =cut
 
 sub new {
-    my ( $class, $fields ) = @_;
-    #my ($class) = ref $proto || $proto;
+    my ( $class, $data ) = @_;
 
-    my $self = {};
+    my $self = {
+    };
 
-    # make a copy of $fields.
     bless $self, $class;
-    $self->_init($fields);
+    $self->_init($data);
 }
+
+=for comment
+The _init method is called by the new method, to figure out what sort of data was passed to C<new()>.  If necessary, it calls $self->parse(), individual element accessor methods, or simply returns $self.
+
+=cut
+
 
 sub _init {
     my ( $self, $data ) = @_;
 
+    # were we passed a hashref? (formatted rule in hashref form)
     if ( ref($data) eq "HASH" ) {
+        # loop through the bits and set the values
         while ( my ( $method, $val ) = each %$data ) {
             $self->$method($val);
         }
     } elsif ( defined($data) ) {
+        # otherwise, interpret this as a plain text rule.
         $self->parse($data);
     }
+    # nothing
     return $self;
 }
 
-=item B<parse($rule_string)>
+=item parse( $rule_string )
 
-The parse method can be used to parse a snort rule string after new() has been called.  The rule object will be populated with the parsed version of $rule_string, overwriting any previously defined values in the object.
+The parse method is what interprets a plain text rule, and populates the rule object.  Beacuse this module does not support the UNIX style line-continuations (backslash at the end of a line) the rule must be all on one line, otherwise the parse will fail in unpredictably interesting and confusing ways.  The parse method tries to interpret the rule from left to right, calling the individual accessor methods for each rule element.  This will overwrite the contents of the object (if any), so if you want to parse multiple rules at once, you will need multiple objects.
 
-  $rule_object->parse($rule_string);
+  $rule->parse($rule_string);
 
 =cut
 
 sub parse {
     my ( $self, $rule ) = @_;
 
-    my @values = split( m/ /, $rule, scalar @RULE_ELEMENTS );    # no critic
+    # nuke extra whitespace pre/post rule
+    $rule =~ s/^\s+//;
+    $rule =~ s/\s+$//;
 
-    for my $i ( 0 .. $#RULE_ELEMENTS ) {
+    # 20090823 RGH: m/\s+/ instead of m/ /; bug reported by Leon Ward
+    my @values = split( m/\s+/, $rule, scalar @RULE_ELEMENTS );    # no critic
+
+    for my $i ( 0 .. $#values ) {
         my $meth = $RULE_ELEMENTS[$i];
         $self->$meth( $values[$i] );
     }
@@ -135,57 +161,61 @@ sub parse {
 
 =back
 
-=head2 METHODS FOR RULE ELEMENTS
+=head2 METHODS FOR ACCESSING RULE ELEMENTS
 
-The following methods read or modify the various rule elements.
+You can access the core parts of a rule (action, protocol, source IP, etc) with the method of their name.  These are read/write L<Class::Accessor> accessors.  If you want to read the value, don't pass an argument.  If you want to set the value, pass in the new value.  In either case it returns the current value, or undef if the value has not been set yet.
+
+=for comment Need to figure out "truth" again in perl sense, do I simply "return;" or "return undef" if the value doesn't exist?  For Parse::Snort::Strict, I need to have two things: 1) make it known to the user that the rule failed to parse, 2) which (may?) be a different meaning than the rule element being empty/undefined.
 
 =over 4
 
-=item B<action> 
+=item action 
 
 The rule action.  Generally one of the following: C<alert>, C<pass>, C<drop>, C<sdrop>, or C<log>.
 
-=item B<proto> 
+=item proto
 
 The protocol of the rule.  Generally one of the following: C<tcp>, C<udp>, C<ip>, or C<icmp>.
 
-=item B<src> 
+=item src
 
 The source IP address for the rule.  Generally a dotted decimal IP address, Snort $HOME_NET variable, or CIDR block notation.
 
-=item B<src_port> 
+=item src_port
 
 The source port for the rule.  Generally a static port, or a contigious range of ports.
 
-=item B<direction> 
+=item direction
 
 The direction of the rule.  One of the following: C<->> C<<>> or C<<->.
 
-=item B<dst> 
+=item dst
 
 The destination IP address for the rule.  Same format as C<src>
 
-=item B<dst_port> 
+=item dst_port
 
 The destination port for the rule.  Same format as C<src>
 
-=item B<opts($opts_array_ref)>, B<opts($opts_string)>
+=item opts ( $opts_array_ref )
+
+=item opts ( $opts_string )
 
 The opts method can be used to read existing options of a parsed rule, or set them.  The method takes two forms of arguments, either an Array of Arrays, or a rule string.
 
 =over 4
 
-=item B<$opts_array_ref>
+=item $opts_array_ref
 
   $opts_array_ref = [
-       [ 'msg' => ':"perl 6 download detected\; may the world rejoice!"' ],
+       [ 'msg' => '"perl 6 download detected\; may the world rejoice!"' ],
        [ 'depth' => 150 ],
        [ 'offset' => 0 ].
        [ 'content' => 'perl-6.0.0' ],
        [ 'nocase' ],
   ]
 
-=item B<$opts_string>
+=item $opts_string
 
   $opts_string='(msg:"perl 6 download detected\; may the world rejoice!";depth:150; offset:0; content:"perl-6.0.0"; nocase;)';
 
@@ -209,23 +239,40 @@ sub opts {
         } else {
 
             # string interface
-            # 'depth:50; offset:0; content;"perl\;6"; nocase;'
+            # 'depth:50; offset:0; content:"perl\;6"; nocase;'
             if ( $args =~ m/^\(/ ) {
+              # remove opts parens if they exist
                 $args =~ s/^\((.+)\)$/$1/;
             }
-            my @set =
-              map { [ split( m/:/, $_, 2 ) ] }
-              $args =~ m/\s*((?:\\.|[^;])+)(?:;|$)\s*/g;
+
+            # When I first wrote this regex I thought it was slick.
+            # I still think that, but 2y after doing it the first time
+            # it just hurt to look at.  So, /x modifier we go!
+            my @set = map { [ split( m/\s*:\s*/, $_, 2 ) ] } $args =~ m/
+                \s*         # ignore preceeding whitespace
+                (           # begin capturing
+                 (?:        # grab characters we want
+                     \\.    # skip over escapes
+                     |
+                     [^;]   # or anything but a ;
+                 )+?        # ? greedyness hack lets the \s* actually match
+                )           # end capturing
+                \s*         # ignore whitespace between value and ; or end of line
+                (?:         # stop anchor at ...
+                  ;         # semicolon
+                  |         # or
+                  $         # end of line
+                )
+                \s*/gx;
             $self->set( 'opts', @set );
         }
     } else {
-
         # getting
         return $self->get('opts');
     }
 }
 
-sub _opt_accessor {
+sub _single_opt_accessor {
     my $opt = shift;
     return sub {
         my ( $self, $val ) = @_;
@@ -233,7 +280,6 @@ sub _opt_accessor {
         # find the (hopefully) pre-existing option in the opts AoA
         my $element;
 
-        #if ( defined $self->get('opts') and ref $self->get('opts') ) {
         if ( defined $self->get('opts') ) {
             $element = first { $_->[0] eq $opt } @{ $self->get('opts') };
         }
@@ -273,28 +319,51 @@ sub _opt_accessor {
 
 # helper accessors that poke around inside rule options
 
-*sid       = _opt_accessor('sid');
-*rev       = _opt_accessor('rev');
-*msg       = _opt_accessor('msg');
-*classtype = _opt_accessor('classtype');
+*sid       = _single_opt_accessor('sid');
+*rev       = _single_opt_accessor('rev');
+*msg       = _single_opt_accessor('msg');
+*classtype = _single_opt_accessor('classtype');
+*gid       = _single_opt_accessor('gid');
+*metadata  = _single_opt_accessor('metadata');
+*priority  = _single_opt_accessor('priority');
 
 =back
 
-=head2 HELPER METHODS FOR OPTIONS
+=head2 HELPER METHODS FOR VARIOUS OPTIONS
 
 =over 4
 
-=item B<sid>, B<rev>, B<msg>, B<classtype> 
+=item sid
 
-The C<sid>, C<rev>, C<msg>, and C<classtype> methods allow direct access to the rule option of the same name
+=item rev
+
+=item msg
+
+=item classtype
+
+=item gid
+
+=item metadata
+
+=item priority
+
+The these methods allow direct access to the rule option of the same name
 
   my $sid = $rule_obj->sid(); # reads the sid of the rule
   $rule_obj->sid($sid); # sets the sid of the rule
   ... etc ...
 
-=item B<references>
+=item references
 
-The C<references> method returns an array reference of the references in the rule.  Each reference is an array, in [ 'reference_type' => 'reference_value' ] format.  To modify references, use the C<opts> method.
+The C<references> method permits read-only access to the C<reference:> options in the rule.  This is in the form of an array of arrays, with each reference in the format
+
+  [ 'reference_type' => 'reference_value' ]
+
+To modify references, use the C<opts> method to grab all the rule options, modify it to your needs, and use the C<opts> method to save your changes back to the rule object.
+
+
+  $references = $rule->references(); # just the references
+  $no_references = grep { $_->[0] != "reference" } @{ $rule->opts() }; # everything but the references
 
 =cut 
 
@@ -306,7 +375,7 @@ sub references {
     return \@references;
 }
 
-=item B<as_string>
+=item as_string
 
 The C<as_string> method returns a string that matches the normal Snort rule form of the object.  This is what you want to use to write a rule to an output file that will be read by Snort.
 
@@ -318,16 +387,18 @@ sub as_string {
     my @missing;
 
     # we may be incomplete
-    if ( @missing = grep { $_ } map { exists( $self->{$_} ) ? undef : $_ } @RULE_ELEMENTS_REQUIRED)
-    { carp sprintf( "Missing required rule element(s): %s", join( " ", @missing ) ); }
+    @missing = grep { $_ } map { exists( $self->{$_} ) ? undef : $_ } @RULE_ELEMENTS_REQUIRED;
 
+    # stitch together the required bits
     if (! scalar @missing)
-    { $ret .= sprintf( "%s %s %s %s %s %s %s", @$self{@RULE_ELEMENTS} ); }
+    { $ret .= sprintf( "%s %s %s %s %s %s %s", @$self{@RULE_ELEMENTS_REQUIRED} ); }
 
+    # tack on opts if they exist
     if ( defined $self->get('opts') )
     { $ret .= sprintf( " (%s)", join( " ", map { $_->[1] ? "$_->[0]:$_->[1];" : "$_->[0];" } @{ $self->get('opts') } )); }
 
-    return ! scalar @missing ? $ret : "";
+    #carp sprintf( "Missing required rule element(s): %s", join( " ", @missing )) if (scalar @missing);
+    return ! scalar @missing ? $ret : undef;
 }
 
 =back
