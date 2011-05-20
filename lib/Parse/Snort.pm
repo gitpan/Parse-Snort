@@ -6,7 +6,7 @@ use base qw(Class::Accessor);
 use List::Util qw(first);
 use Carp qw(carp);
 
-our $VERSION = '0.5';
+our $VERSION = '0.6';
 
 =head1 NAME
 
@@ -395,7 +395,7 @@ sub as_string {
 
     # tack on opts if they exist
     if ( defined $self->get('opts') )
-    { $ret .= sprintf( " (%s)", join( " ", map { $_->[1] ? "$_->[0]:$_->[1];" : "$_->[0];" } @{ $self->get('opts') } )); }
+    { $ret .= sprintf( " (%s)", join( " ", map { defined($_->[1]) ? "$_->[0]:$_->[1];" : "$_->[0];" } @{ $self->get('opts') } )); }
 
     #carp sprintf( "Missing required rule element(s): %s", join( " ", @missing )) if (scalar @missing);
     return ! scalar @missing ? $ret : undef;
